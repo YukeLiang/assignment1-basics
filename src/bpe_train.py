@@ -1,8 +1,7 @@
 import os
 import regex as re
-from typing import BinaryIO
+from typing import BinaryIO, Counter
 import multiprocessing
-
 
 
 def find_chunk_boundaries(
@@ -52,30 +51,40 @@ def find_chunk_boundaries(
     return sorted(set(chunk_boundaries))
 
 
-def pretokenize_chunk(chunk: bytes) -> dict[tuple[bytes, ...], int]:
-    # Run pre-tokenization on your chunk and store the counts for each pre-token
-    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-    pre_tokens = re.findall(PAT, chunk.decode("utf-8", errors="ignore"), flags=re.IGNORECASE | re.UNICODE)
+def pretokenize_chunk(chunk: bytes, special_tokens: list[str] | None = None) -> dict[tuple[bytes, ...], int]:
+    # sort special tokens by length in descending order to avoid partial matches
+    if special_tokens:
+        special_tokens.sort(key=len, reverse=True)
+    # regex pattern to split on special tokens from the input file to avoid counting them in the pre-tokenization step
+    split_pattern = "|".join(re.escape(token) for token in (special_tokens or [])).encode("utf-8")
+    # split the chunk into pre-tokens using regex and count the occurrences of each pre-token
+    chunk_processed = re.split(split_pattern, chunk)
+    # Run pre-tokenization on each sub-chunk and store the counts for each pre-token
     pre_token_counts: dict[tuple[bytes, ...], int] = {}
-    for pre_token in pre_tokens:
-        # Store the counts for each pre-token in byte arrays in a dictionary or other data structure
-        pre_token_raw_bytes = pre_token.encode("utf-8")
-        pre_token_bytes_tuple = tuple(pre_token_raw_bytes[i:i+1] for i in range(len(pre_token_raw_bytes)))
-        pre_token_counts[pre_token_bytes_tuple] = pre_token_counts.get(pre_token_bytes_tuple, 0) + 1
+    for sub_chunk in chunk_processed:
+        # Run pre-tokenization on your sub-chunk and store the counts for each pre-token
+        PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+        pre_tokens = re.findall(PAT, sub_chunk.decode("utf-8", errors="ignore"), flags=re.IGNORECASE | re.UNICODE)
+        for pre_token in pre_tokens:
+            # Store the counts for each pre-token in byte arrays in a dictionary or other data structure
+            pre_token_raw_bytes = pre_token.encode("utf-8")
+            pre_token_bytes_tuple = tuple(pre_token_raw_bytes[i:i+1] for i in range(len(pre_token_raw_bytes)))
+            pre_token_counts[pre_token_bytes_tuple] = pre_token_counts.get(pre_token_bytes_tuple, 0) + 1
     return pre_token_counts
 
 
-def pretokenize_file(input_path: str, split_special_token: bytes) -> dict[tuple[bytes, ...], int]:
+def pretokenize_file(input_path: str, special_tokens: list[str] | None = None) -> dict[tuple[bytes, ...], int]:
     with open(input_path, "rb") as f:
         num_processes = 4
-        boundaries = find_chunk_boundaries(f, num_processes, split_special_token)
+        boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>") # hardcoded per document
+        print("Found boundaries:", boundaries)
         pre_token_counts: dict[tuple[bytes, ...], int] = {}
 
         # Create a list of chunks to process
         chunks = []
         for start, end in zip(boundaries[:-1], boundaries[1:]):
             f.seek(start)
-            chunk = f.read(end - start).decode("utf-8", errors="ignore")
+            chunk = f.read(end - start)
             chunks.append(chunk)
 
         # use multiprocessing to parallelize the pre-tokenization of chunks
@@ -83,12 +92,19 @@ def pretokenize_file(input_path: str, split_special_token: bytes) -> dict[tuple[
         if multiprocessing_enabled:
             with multiprocessing.Pool(processes=num_processes) as pool:
                 # Map the parallel_pretokenize_chunk function to the chunks
-                pre_token_counts = pool.map(pretokenize_chunk, chunks)
+                res = pool.starmap(pretokenize_chunk, ((chunk, special_tokens) for chunk in chunks))
+                # Combine the results from all chunks into a single dictionary by adding the counts for each pre-token
+                # for r in res:
+                #     for pre_token_bytes_tuple, count in r.items():
+                #         pre_token_counts[pre_token_bytes_tuple] = pre_token_counts.get(pre_token_bytes_tuple, 0) + count
+
+                # use collections.Counter to combine the results from all chunks into a single dictionary by adding the counts for each pre-token
+                pre_token_counts = dict(sum((Counter(chunk_result) for chunk_result in res), Counter()))
         else:
             # The following is a serial implementation, but you can parallelize this
             # by sending each start/end pair to a set of processes.
             for chunk in chunks:
-                result = pretokenize_chunk(chunk)
+                result = pretokenize_chunk(chunk, special_tokens)
                 for pre_token_bytes_tuple, count in result.items():
                     pre_token_counts[pre_token_bytes_tuple] = pre_token_counts.get(pre_token_bytes_tuple, 0) + count
     return pre_token_counts
@@ -100,23 +116,31 @@ def train_bpe(
     special_tokens: list[str] | None = None,
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     """Train a BPE tokenizer from a text corpus."""
-    # strip all special tokens from the input file to avoid counting them in the pre-tokenization step
-    if special_tokens:
-        with open(input_path, "rb") as f:
-            text = f.read()
-        for token in special_tokens:
-            text = text.replace(token.encode("utf-8"), b"")
-        with open(input_path, "wb") as f:
-            f.write(text)
-    # pretokenize the file and get the pre-token counts
-    pre_token_counts = pretokenize_file(input_path, b"<|endoftext|>")
 
+    # pretokenize the file and get the pre-token counts
+    pre_token_counts = pretokenize_file(input_path, special_tokens)
+    # pairs should be a sorted dictionary of pairs of consecutive bytes and their counts, sorted by count in descending order
+    pairs = dict(sorted(pairs.items(), key=lambda x: x[1], reverse=True))
+    for pre_token_bytes_tuple, count in pre_token_counts.items():
+        # Count the occurrences of each pair of consecutive bytes in the pre-token
+        for i in range(len(pre_token_bytes_tuple) - 1):
+            pair = (pre_token_bytes_tuple[i], pre_token_bytes_tuple[i + 1])
+            pairs[pair] = pairs.get(pair, 0) + count
+
+    
     # initialize vocabulary with special tokens if provided and 256 byte values
     vocab: dict[int, bytes] = {i: bytes([i]) for i in range(256)}
-    if special_tokens:
-        for token in special_tokens:
-            vocab[len(vocab)] = token.encode("utf-8")
-
     merges: list[tuple[bytes, bytes]] = []
 
 
+# z = {}
+# a = {(b'a',): 3, (b'b',): 2}
+# b = {(b'a',): 1, (b'c',): 5}
+# c = [a, b]
+# for r in c:
+#     for pre_token_bytes_tuple, count in r.items():
+#         z[pre_token_bytes_tuple] = z.get(pre_token_bytes_tuple, 0) + count
+# print(z)  # Output: {(b'a',): 4, (b'b',): 2, (b'c',): 5}
+
+if __name__ == "__main__":
+    print (pretokenize_file("data/test.txt", ["<|endoftext|>"]))  # Replace with your input file path
