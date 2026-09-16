@@ -3,7 +3,6 @@ import regex as re
 from typing import BinaryIO, Counter
 import multiprocessing
 
-
 def find_chunk_boundaries(
     file: BinaryIO,
     desired_num_chunks: int,
@@ -77,7 +76,6 @@ def pretokenize_file(input_path: str, special_tokens: list[str] | None = None) -
     with open(input_path, "rb") as f:
         num_processes = 4
         boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>") # hardcoded per document
-        print("Found boundaries:", boundaries)
         pre_token_counts: dict[tuple[bytes, ...], int] = {}
 
         # Create a list of chunks to process
@@ -110,28 +108,64 @@ def pretokenize_file(input_path: str, special_tokens: list[str] | None = None) -
     return pre_token_counts
 
 
+def get_pairs(pre_token_counts: dict[tuple[bytes, ...], int]) -> dict[tuple[bytes, bytes], int]:
+    """Get the counts of pairs of consecutive bytes in the pre-token counts."""
+    pairs: dict[tuple[bytes, bytes], int] = {}
+    for pre_token_bytes_tuple, count in pre_token_counts.items():
+        # Count the occurrences of each pair of consecutive bytes in the pre-token
+        for i in range(len(pre_token_bytes_tuple) - 1):
+            pair = (pre_token_bytes_tuple[i], pre_token_bytes_tuple[i + 1])
+            pairs[pair] = pairs.get(pair, 0) + count
+    return pairs
+
+
+def merge_pair(input_counts: dict[tuple[bytes, ...], int], pair: tuple[bytes, bytes]) -> dict[tuple[bytes, ...], int]:
+    """Merge a pair of consecutive bytes in the pre-token counts."""
+    output_counts: dict[tuple[bytes, ...], int] = {}
+    for pre_token_bytes_tuple, count in input_counts.items():
+        merged_tuple = []
+        i = 0
+        while i < len(pre_token_bytes_tuple):
+            if i < len(pre_token_bytes_tuple) - 1 and (pre_token_bytes_tuple[i], pre_token_bytes_tuple[i + 1]) == pair:
+                merged_tuple.append(pair[0] + pair[1])  # Merge the pair into a single byte
+                i += 2  # Skip the next byte since it's part of the merged pair
+            else:
+                merged_tuple.append(pre_token_bytes_tuple[i])
+                i += 1
+        output_counts[tuple(merged_tuple)] = output_counts.get(tuple(merged_tuple), 0) + count
+    return output_counts
+
+
 def train_bpe(
     input_path: str,
     vocab_size: int,
     special_tokens: list[str] | None = None,
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     """Train a BPE tokenizer from a text corpus."""
+    # initialize vocabulary with special tokens if provided and 256 byte values
+    vocab: dict[int, bytes] = {i: bytes([i]) for i in range(256)}
+    vocab.update({i + 256: token.encode("utf-8") for i, token in enumerate(special_tokens or [])})
+    merges: list[tuple[bytes, bytes]] = []
 
     # pretokenize the file and get the pre-token counts
     pre_token_counts = pretokenize_file(input_path, special_tokens)
-    # pairs should be a sorted dictionary of pairs of consecutive bytes and their counts, sorted by count in descending order
-    pairs = dict(sorted(pairs.items(), key=lambda x: x[1], reverse=True))
-    for pre_token_bytes_tuple, count in pre_token_counts.items():
-        # Count the occurrences of each pair of consecutive bytes in the pre-token
-        for i in range(len(pre_token_bytes_tuple) - 1):
-            pair = (pre_token_bytes_tuple[i], pre_token_bytes_tuple[i + 1])
-            pairs[pair] = pairs.get(pair, 0) + count
 
-    
-    # initialize vocabulary with special tokens if provided and 256 byte values
-    vocab: dict[int, bytes] = {i: bytes([i]) for i in range(256)}
-    merges: list[tuple[bytes, bytes]] = []
+    merge_count = vocab_size - 256 - len(special_tokens or []) 
+    for _ in range(merge_count):
+        pairs = get_pairs(pre_token_counts)
+        if not pairs:
+            break
+        # Find the most frequent pair of consecutive bytes
+        # if count is the same, ties broken by choosing the greater lexicographical order one
 
+        most_frequent_pair = max(pairs, key=lambda pair: (pairs[pair], pair))
+        merges.append(most_frequent_pair)
+        # Add the merged pair to the vocabulary with a new index
+        vocab.update({len(vocab): most_frequent_pair[0] + most_frequent_pair[1]})
+        # Merge the most frequent pair in the pre-token counts
+        pre_token_counts = merge_pair(pre_token_counts, most_frequent_pair)
+
+    return vocab, merges
 
 # z = {}
 # a = {(b'a',): 3, (b'b',): 2}
@@ -143,4 +177,5 @@ def train_bpe(
 # print(z)  # Output: {(b'a',): 4, (b'b',): 2, (b'c',): 5}
 
 if __name__ == "__main__":
-    print (pretokenize_file("data/test.txt", ["<|endoftext|>"]))  # Replace with your input file path
+    # print (merge_pair({(b't', b'h', b'e'): 1}, (b't', b'h')))
+    print (train_bpe("data/TinyStoriesV2-GPT4-valid.txt", 1000,["<|endoftext|>"]))  # Replace with your input file path
