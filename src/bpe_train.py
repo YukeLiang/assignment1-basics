@@ -1,7 +1,9 @@
-import os
-import regex as re
-from typing import BinaryIO, Counter
 import multiprocessing
+import os
+from typing import BinaryIO, Counter
+
+import regex as re
+
 
 def find_chunk_boundaries(
     file: BinaryIO,
@@ -67,7 +69,7 @@ def pretokenize_chunk(chunk: bytes, special_tokens: list[str] | None = None) -> 
         for pre_token in pre_tokens:
             # Store the counts for each pre-token in byte arrays in a dictionary or other data structure
             pre_token_raw_bytes = pre_token.encode("utf-8")
-            pre_token_bytes_tuple = tuple(pre_token_raw_bytes[i:i+1] for i in range(len(pre_token_raw_bytes)))
+            pre_token_bytes_tuple = tuple(pre_token_raw_bytes[i : i + 1] for i in range(len(pre_token_raw_bytes)))
             pre_token_counts[pre_token_bytes_tuple] = pre_token_counts.get(pre_token_bytes_tuple, 0) + 1
     return pre_token_counts
 
@@ -75,7 +77,7 @@ def pretokenize_chunk(chunk: bytes, special_tokens: list[str] | None = None) -> 
 def pretokenize_file(input_path: str, special_tokens: list[str] | None = None) -> dict[tuple[bytes, ...], int]:
     with open(input_path, "rb") as f:
         num_processes = 4
-        boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>") # hardcoded per document
+        boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")  # hardcoded per document
         pre_token_counts: dict[tuple[bytes, ...], int] = {}
 
         # Create a list of chunks to process
@@ -150,7 +152,7 @@ def train_bpe(
     # pretokenize the file and get the pre-token counts
     pre_token_counts = pretokenize_file(input_path, special_tokens)
 
-    merge_count = vocab_size - 256 - len(special_tokens or []) 
+    merge_count = vocab_size - 256 - len(special_tokens or [])
     for _ in range(merge_count):
         pairs = get_pairs(pre_token_counts)
         if not pairs:
@@ -167,6 +169,7 @@ def train_bpe(
 
     return vocab, merges
 
+
 # z = {}
 # a = {(b'a',): 3, (b'b',): 2}
 # b = {(b'a',): 1, (b'c',): 5}
@@ -178,4 +181,4 @@ def train_bpe(
 
 if __name__ == "__main__":
     # print (merge_pair({(b't', b'h', b'e'): 1}, (b't', b'h')))
-    print (train_bpe("data/TinyStoriesV2-GPT4-valid.txt", 1000,["<|endoftext|>"]))  # Replace with your input file path
+    print(train_bpe("data/TinyStoriesV2-GPT4-valid.txt", 1000, ["<|endoftext|>"]))  # Replace with your input file path
