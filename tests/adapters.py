@@ -15,6 +15,8 @@ from src.bpe import train_bpe
 from src.tokenizer import Tokenizer
 from src.model import Linear
 from src.model import Embedding
+from src.model import RMSNorm
+from src.model import SwiGLU
 
 
 def run_linear(
@@ -36,7 +38,7 @@ def run_linear(
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
     ll = Linear(d_in, d_out)
-    state_dict = {"weights": weights}
+    state_dict = {"weight": weights}
     ll.load_state_dict(state_dict)
     return ll.forward(in_features)
 
@@ -95,7 +97,11 @@ def run_swiglu(
     # swiglu.w1.weight.data = w1_weight
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
-    raise NotImplementedError
+    ffn = SwiGLU(d_model, d_ff)
+    state_dict = {"w_si.weight": w1_weight, "w_glu.weight": w3_weight, "w_down.weight": w2_weight}
+    ffn.load_state_dict(state_dict)
+    return ffn.forward(in_features)
+
 
 
 def run_scaled_dot_product_attention(
@@ -390,7 +396,10 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
-    raise NotImplementedError
+    rmsnorm = RMSNorm(d_model, eps)
+    state_dict = {"weight": weights}
+    rmsnorm.load_state_dict(state_dict)
+    return rmsnorm.forward(in_features)
 
 
 def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
